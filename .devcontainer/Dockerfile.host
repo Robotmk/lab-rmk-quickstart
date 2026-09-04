@@ -1,0 +1,72 @@
+FROM debian:12
+
+# systemd is the whole point of this container. The Checkmk agent installs
+# itself as a set of systemd units — socket, async service, controller daemon —
+# exactly as it would on a real machine. Without systemd the package needs four
+# workarounds, and the learner would practise four handgrips that do not exist
+# outside a lab. See ADR-0072 in the academy repository.
+# feh is 335 kB and the only reason it is here: fluxbox calls fbsetbg on every
+# start, fbsetbg looks for something that can paint the root window, finds
+# nothing, and puts an xmessage dialog in the learner's face explaining how to
+# install Eterm. Setting rootCommand in ~/.fluxbox/init does not stop it, and
+# neither does "background: none" in an overlay — both measured. Giving it a
+# tool it accepts does: zero dialogs.
+#
+# The desktop runs as systemd units, never as a devcontainer feature: features
+# that carry "init" take PID 1 away from systemd, and then the agent cannot be
+# installed the honest way. Measured — see ADR-0072.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      systemd systemd-sysv dbus ca-certificates curl wget sudo git \
+      procps less nginx-light \
+      tigervnc-standalone-server tigervnc-common fluxbox \
+      novnc websockify x11-utils x11-xserver-utils xterm firefox-esr \
+      feh \
+ && rm -rf /var/lib/apt/lists/* \
+ && rm -f /lib/systemd/system/multi-user.target.wants/* \
+          /etc/systemd/system/*.wants/* \
+          /lib/systemd/system/sockets.target.wants/*udev*
+
+# procps is not optional here: the Checkmk agent builds its <<<ps_lnx>>> section
+# with `ps ax` (check_mk_agent.linux:870) and uses ps in three more places.
+# Debian's minimal image has none of it, so process monitoring would silently
+# come up empty — in a monitoring course.
+# firefox-esr is here for the LEARNER, not for the test: they download RCC from
+# GitHub on the machine they work on. Playwright still brings its own browser,
+# fetched by RCC — the two do not overlap.
+# RCC and the Checkmk agent are deliberately NOT installed here. Installing them
+# is what the course teaches; a lab that pre-installs them teaches nothing.
+
+# Debian's novnc ships vnc.html but no index.html, so websockify serves a bare
+# directory listing on port 6080. Send the learner straight into the viewer.
+RUN printf '%s\n' \
+      '<!doctype html><meta charset="utf-8">' \
+      '<title>Roboland Lab desktop</title>' \
+      '<meta http-equiv="refresh" content="0; url=vnc.html?resize=remote">' \
+      '<p>Opening the desktop&hellip; <a href="vnc.html?resize=remote">continue</a>' \
+      > /usr/share/novnc/index.html
+
+# The Docker client only — not the engine. Debian ships docker.io 20.10, which
+# is the whole engine and older than the socket it would talk to. With the host's
+# socket mounted, this is enough to reach the Checkmk container next door.
+ARG DOCKER_CLI_VERSION=27.5.1
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    curl -fsSL "https://download.docker.com/linux/static/stable/${arch}/docker-${DOCKER_CLI_VERSION}.tgz" \
+      -o /tmp/docker.tgz; \
+    tar -xzf /tmp/docker.tgz -C /tmp docker/docker; \
+    install -m 0755 /tmp/docker/docker /usr/local/bin/docker; \
+    rm -rf /tmp/docker.tgz /tmp/docker
+
+COPY nginx/checkmk.conf /etc/nginx/sites-available/checkmk
+RUN rm -f /etc/nginx/sites-enabled/default \
+ && ln -sf /etc/nginx/sites-available/checkmk /etc/nginx/sites-enabled/checkmk
+
+COPY cmk-shell /usr/local/bin/cmk-shell
+COPY fluxbox/ /root/.fluxbox/
+COPY units/*.service /etc/systemd/system/
+RUN systemctl disable nginx 2>/dev/null || true; \
+    systemctl mask nginx; \
+    systemctl enable vncserver fluxbox novnc desktop-session checkmk-port
+
+STOPSIGNAL SIGRTMIN+3
+ENTRYPOINT ["/sbin/init"]

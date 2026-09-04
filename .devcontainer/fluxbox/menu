@@ -1,0 +1,6 @@
+[begin] (Roboland Lab)
+  [exec] (Terminal) {xterm -fa Monospace -fs 11 -bg black -fg white}
+  [exec] (Firefox) {firefox-esr}
+  [separator]
+  [restart] (Restart the desktop)
+[end]
